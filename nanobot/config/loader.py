@@ -72,21 +72,43 @@ def _migrate_config(data: dict) -> dict:
     return data
 
 
-def convert_keys(data: Any) -> Any:
+def _preserve_dict_keys(path: tuple[str, ...]) -> bool:
+    """Return True when dict keys under this path must remain untouched.
+
+    Some config fields are free-form maps (for example MCP env vars and
+    custom HTTP headers). Their keys are case-sensitive and must not be
+    transformed between snake_case and camelCase.
+    """
+    if not path:
+        return False
+    return path[-1] in {"env", "extraHeaders", "extra_headers"}
+
+
+def convert_keys(data: Any, path: tuple[str, ...] = ()) -> Any:
     """Convert camelCase keys to snake_case for Pydantic."""
     if isinstance(data, dict):
-        return {camel_to_snake(k): convert_keys(v) for k, v in data.items()}
+        if _preserve_dict_keys(path):
+            return {k: convert_keys(v, path + (k,)) for k, v in data.items()}
+        return {
+            camel_to_snake(k): convert_keys(v, path + (k,))
+            for k, v in data.items()
+        }
     if isinstance(data, list):
-        return [convert_keys(item) for item in data]
+        return [convert_keys(item, path) for item in data]
     return data
 
 
-def convert_to_camel(data: Any) -> Any:
+def convert_to_camel(data: Any, path: tuple[str, ...] = ()) -> Any:
     """Convert snake_case keys to camelCase."""
     if isinstance(data, dict):
-        return {snake_to_camel(k): convert_to_camel(v) for k, v in data.items()}
+        if _preserve_dict_keys(path):
+            return {k: convert_to_camel(v, path + (k,)) for k, v in data.items()}
+        return {
+            snake_to_camel(k): convert_to_camel(v, path + (k,))
+            for k, v in data.items()
+        }
     if isinstance(data, list):
-        return [convert_to_camel(item) for item in data]
+        return [convert_to_camel(item, path) for item in data]
     return data
 
 
