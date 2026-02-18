@@ -67,6 +67,9 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        # Explicit execution policy (placed last to override conflicting workspace hints)
+        parts.append(self._get_execution_policy())
         
         return "\n\n---\n\n".join(parts)
     
@@ -108,6 +111,17 @@ For normal conversation, just respond with text - do not call the message tool.
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+
+    def _get_execution_policy(self) -> str:
+        """Task execution policy for tool-calling behavior."""
+        return """# Execution Policy
+
+- Keep normal conversation behavior unchanged: for pure chat/Q&A, respond directly in text.
+- For concrete executable requests (create/edit files, run commands, web lookup, save outputs), execute immediately using tools in the same turn.
+- Do not stop at "I will do it" or ask for confirmation when the request is clear and actionable.
+- If blocked by a real issue (missing dependency, auth failure, permission/network error, ambiguous destination), explain the blocker and ask only the minimum required follow-up.
+- After execution, report concise results and output paths.
+"""
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
