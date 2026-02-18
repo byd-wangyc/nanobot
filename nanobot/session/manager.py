@@ -132,7 +132,7 @@ class SessionManager:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             metadata_line = {
                 "_type": "metadata",
                 "created_at": session.created_at.isoformat(),
@@ -140,9 +140,9 @@ class SessionManager:
                 "metadata": session.metadata,
                 "last_consolidated": session.last_consolidated
             }
-            f.write(json.dumps(metadata_line) + "\n")
+            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
             for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
     
