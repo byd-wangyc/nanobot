@@ -14,7 +14,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+from nanobot.agent.tools.web import WebFetchTool
 
 
 class SubagentManager:
@@ -112,7 +112,6 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
             tools.register(WebFetchTool())
             
             # Build messages with subagent-specific prompt
@@ -238,7 +237,10 @@ You are a subagent spawned by the main agent to complete a specific task.
 ## What You Can Do
 - Read and write files in the workspace
 - Execute shell commands
-- Search the web and fetch web pages
+- Fetch web pages
+- Default web search via tavily skill scripts:
+  - node {self.workspace}/skills/tavily-search/scripts/search.mjs "query" -n 5
+  - node {self.workspace}/skills/tavily-search/scripts/extract.mjs "url"
 - Complete the task thoroughly
 
 ## What You Cannot Do

@@ -110,6 +110,9 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - Do not assume a file or directory exists — use list_dir or read_file to verify.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
+- Default web search method is tavily skill scripts (not web_search):
+  - `node {workspace_path}/skills/tavily-search/scripts/search.mjs "query" -n 5`
+  - `node {workspace_path}/skills/tavily-search/scripts/extract.mjs "url"`
 
 ## Memory
 - Remember important facts: write to {workspace_path}/memory/MEMORY.md
