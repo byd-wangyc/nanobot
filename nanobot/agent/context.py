@@ -70,6 +70,9 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}"""
             )
 
+        # Keep this policy at the end so it overrides conflicting workspace hints.
+        parts.append(self._get_execution_policy())
+
         return "\n\n---\n\n".join(parts)
 
     def _get_identity(self) -> str:
@@ -85,12 +88,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
         return f"""# nanobot 🐈
 
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
-- Read, write, and edit files
-- Execute shell commands
-- Search the web and fetch web pages
-- Send messages to users on chat channels
-- Spawn subagents for complex background tasks
+You are nanobot, a helpful AI assistant. 
 
 ## Current Time
 {now} ({tz})
@@ -104,13 +102,29 @@ Your workspace is at: {workspace_path}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
+Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
 
-Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
-When remembering something important, write to {workspace_path}/memory/MEMORY.md
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+## Tool Call Guidelines
+- Before calling tools, you may briefly state your intent (e.g. "Let me check that"), but NEVER predict or describe the expected result before receiving it.
+- Before modifying a file, read it first to confirm its current content.
+- Do not assume a file or directory exists — use list_dir or read_file to verify.
+- After writing or editing a file, re-read it if accuracy matters.
+- If a tool call fails, analyze the error before retrying with a different approach.
+
+## Memory
+- Remember important facts: write to {workspace_path}/memory/MEMORY.md
+- Recall past events: grep {workspace_path}/memory/HISTORY.md"""
+
+    def _get_execution_policy(self) -> str:
+        """Task execution policy for tool-calling behavior."""
+        return """# Execution Policy
+
+- Keep normal conversation behavior unchanged: for pure chat/Q&A, respond directly in text.
+- For concrete executable requests (create/edit files, run commands, web lookup, save outputs), execute immediately using tools in the same turn.
+- Do not stop at "I will do it" or ask for confirmation when the request is clear and actionable.
+- If blocked by a real issue (missing dependency, auth failure, permission/network error, ambiguous destination), explain the blocker and ask only the minimum required follow-up.
+- After execution, report concise results and output paths.
+"""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
@@ -238,15 +252,15 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         """
         msg: dict[str, Any] = {"role": "assistant"}
 
-        # Omit empty content — some backends reject empty text blocks
-        if content:
-            msg["content"] = content
+        # Always include content — some providers (e.g. StepFun) reject
+        # assistant messages that omit the key entirely.
+        msg["content"] = content
 
         if tool_calls:
             msg["tool_calls"] = tool_calls
 
         # Include reasoning content when provided (required by some thinking models)
-        if reasoning_content:
+        if reasoning_content is not None:
             msg["reasoning_content"] = reasoning_content
 
         messages.append(msg)
