@@ -21,11 +21,13 @@ Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" 
 
 ## When to Update MEMORY.md
 
-Write important facts immediately using `edit_file` or `write_file`:
+Only update `memory/MEMORY.md` when the user explicitly asks you to save something into long-term memory. Do not write to it automatically.
+
+When the user gives an explicit memory-write instruction, update it carefully using `edit_file` or `write_file`:
 - User preferences ("I prefer dark mode")
 - Project context ("The API uses OAuth2")
 - Relationships ("Alice is the project lead")
 
 ## Auto-consolidation
 
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+Old conversations are automatically summarized and appended to `HISTORY.md` when the prompt token budget is exceeded. `MEMORY.md` is not updated by auto-consolidation.

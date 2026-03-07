@@ -26,6 +26,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.tokens import count_messages_tokens
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -56,6 +57,10 @@ class AgentLoop:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         memory_window: int = 100,
+        context_window_tokens: int = 128000,
+        recent_history_tokens: int = 24000,
+        history_recall_top_k: int = 3,
+        history_recall_max_chars: int = 1200,
         reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -75,13 +80,21 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
+        self.context_window_tokens = context_window_tokens
+        self.recent_history_tokens = recent_history_tokens
+        self.history_recall_top_k = history_recall_top_k
+        self.history_recall_max_chars = history_recall_max_chars
         self.reasoning_effort = reasoning_effort
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(
+            workspace,
+            history_recall_top_k=history_recall_top_k,
+            history_recall_max_chars=history_recall_max_chars,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -154,6 +167,26 @@ class AgentLoop:
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+
+    def _set_memory_write_permission(self, current_message: str) -> None:
+        """Allow MEMORY.md updates only on explicit user instruction."""
+        allowed = MemoryStore.user_explicitly_requested_memory_write(current_message)
+        for name in ("write_file", "edit_file"):
+            if tool := self.tools.get(name):
+                if hasattr(tool, "set_memory_write_permission"):
+                    tool.set_memory_write_permission(allowed)
+
+    def _max_input_tokens(self) -> int:
+        """Maximum prompt tokens after reserving room for model output."""
+        return max(1024, self.context_window_tokens - self.max_tokens)
+
+    def _prompt_token_count(self, messages: list[dict[str, Any]]) -> int:
+        """Count prompt tokens including current tool schemas."""
+        return count_messages_tokens(
+            messages,
+            model=self.model,
+            tools=self.tools.get_definitions(),
+        )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -346,13 +379,18 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.memory_window)
-            messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
+            self._set_memory_write_permission(msg.content)
+            system_msg = InboundMessage(
+                channel=channel,
+                sender_id=msg.sender_id,
+                chat_id=chat_id,
+                content=msg.content,
+                metadata=msg.metadata,
+                media=msg.media,
             )
+            messages = await self._build_messages_with_token_budget(session, system_msg)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
+            self._save_turn(session, all_msgs, len(messages))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -397,36 +435,13 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
-        unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
-            self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock():
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session)
-                finally:
-                    self._consolidating.discard(session.key)
-                    _task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidation_tasks.discard(_task)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(_task)
-
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_memory_write_permission(msg.content)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=self.memory_window)
-        initial_messages = self.context.build_messages(
-            history=history,
-            current_message=msg.content,
-            media=msg.media if msg.media else None,
-            channel=msg.channel, chat_id=msg.chat_id,
-        )
+        initial_messages = await self._build_messages_with_token_budget(session, msg)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -443,7 +458,7 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
+        self._save_turn(session, all_msgs, len(initial_messages))
         self.sessions.save(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
@@ -467,8 +482,13 @@ class AgentLoop:
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
-                if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                    continue
+                if isinstance(content, str):
+                    if content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                        continue
+                    if content.startswith(ContextBuilder._HISTORY_RECALL_TAG):
+                        continue
+                    if content.startswith("Review the tool results and continue working toward the goal."):
+                        continue
                 if isinstance(content, list):
                     entry["content"] = [
                         {"type": "text", "text": "[image]"} if (
@@ -484,8 +504,57 @@ class AgentLoop:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
         return await MemoryStore(self.workspace).consolidate(
             session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
+            archive_all=archive_all, keep_tokens=self.recent_history_tokens,
         )
+
+    async def _build_messages_with_token_budget(
+        self,
+        session: Session,
+        msg: InboundMessage,
+    ) -> list[dict[str, Any]]:
+        """Build prompt messages, consolidating history only when token budget is exceeded."""
+        max_input_tokens = self._max_input_tokens()
+
+        while True:
+            history = session.get_history(
+                max_messages=self.memory_window,
+                max_tokens=self.recent_history_tokens,
+                model=self.model,
+            )
+            messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
+
+            prompt_tokens = self._prompt_token_count(messages)
+            if prompt_tokens <= max_input_tokens:
+                return messages
+
+            if session.key in self._consolidating:
+                logger.warning(
+                    "Prompt still exceeds token budget while consolidation is already running: {} > {}",
+                    prompt_tokens, max_input_tokens,
+                )
+                return messages
+
+            before = session.last_consolidated
+            self._consolidating.add(session.key)
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            try:
+                async with lock:
+                    changed = await self._consolidate_memory(session)
+            finally:
+                self._consolidating.discard(session.key)
+
+            if not changed or session.last_consolidated == before:
+                logger.warning(
+                    "Prompt exceeds token budget but no more history can be consolidated: {} > {}",
+                    prompt_tokens, max_input_tokens,
+                )
+                return messages
 
     async def process_direct(
         self,

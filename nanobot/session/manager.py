@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
+from nanobot.utils.tokens import count_messages_tokens
 
 
 @dataclass
@@ -42,16 +43,45 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
     
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(
+        self,
+        max_messages: int = 500,
+        *,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
+
+        if max_tokens and max_tokens > 0:
+            selected_rev: list[dict[str, Any]] = []
+            total = 0
+            for message in reversed(sliced):
+                entry = _to_history_message(message)
+                cost = count_messages_tokens([entry], model=model)
+                if selected_rev and total + cost > max_tokens:
+                    break
+                selected_rev.append(message)
+                total += cost
+            sliced = list(reversed(selected_rev))
+
+            if sliced and sliced[0].get("role") != "user":
+                start = len(unconsolidated) - len(sliced) - 1
+                while start >= 0:
+                    candidate = unconsolidated[start]
+                    sliced.insert(0, candidate)
+                    if candidate.get("role") == "user":
+                        break
+                    start -= 1
 
         # Drop leading non-user messages to avoid orphaned tool_result blocks
         for i, m in enumerate(sliced):
             if m.get("role") == "user":
                 sliced = sliced[i:]
                 break
+        else:
+            return []
 
         out: list[dict[str, Any]] = []
         for m in sliced:
@@ -67,6 +97,15 @@ class Session:
         self.messages = []
         self.last_consolidated = 0
         self.updated_at = datetime.now()
+
+
+def _to_history_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Convert a stored session message into provider-compatible message shape."""
+    entry: dict[str, Any] = {"role": message["role"], "content": message.get("content", "")}
+    for key in ("tool_calls", "tool_call_id", "name", "reasoning_content", "thinking_blocks"):
+        if key in message:
+            entry[key] = message[key]
+    return entry
 
 
 class SessionManager:

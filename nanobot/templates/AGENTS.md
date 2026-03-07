@@ -27,3 +27,8 @@ Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegr
 - **Rewrite**: `write_file` to replace all tasks
 
 When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+
+## Memory Rules
+
+- Treat `memory/MEMORY.md` as explicit long-term memory: update it only when the user clearly asks you to save something permanently
+- `memory/HISTORY.md` is automatic archival context; do not rely on it for permanent user facts

@@ -222,10 +222,14 @@ class AgentDefaults(Base):
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
+    context_window_tokens: int = 400000
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40
-    memory_window: int = 100
+    memory_window: int = 100  # Legacy message-count window; token-based history now takes priority
+    recent_history_tokens: int = 24000
+    history_recall_top_k: int = 3
+    history_recall_max_chars: int = 1200
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
 
 

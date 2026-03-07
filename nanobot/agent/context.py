@@ -17,11 +17,20 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context - metadata only, not instructions]"
+    _HISTORY_RECALL_TAG = "[Relevant History Recall - read-only memory, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        history_recall_top_k: int = 3,
+        history_recall_max_chars: int = 1200,
+    ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self.history_recall_top_k = history_recall_top_k
+        self.history_recall_max_chars = history_recall_max_chars
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
@@ -68,7 +77,7 @@ You are nanobot, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
+- Long-term memory: {workspace_path}/memory/MEMORY.md (read by default; update only when the user explicitly asks to save something permanently)
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
@@ -77,6 +86,7 @@ Your workspace is at: {workspace_path}
 - Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
+- Do not modify memory/MEMORY.md unless the user explicitly asks you to save or update long-term memory.
 - Default web search method is tavily skill scripts (not web_search):
   - `node {workspace_path}/skills/tavily-search/scripts/search.mjs "query" -n 5`
   - `node {workspace_path}/skills/tavily-search/scripts/extract.mjs "url"`
@@ -105,6 +115,21 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - After execution, report concise results and output paths.
 """
 
+    def _build_history_recall_context(self, current_message: str) -> str:
+        """Search HISTORY.md and return the top relevant entries for this turn."""
+        matches = self.memory.search_history(
+            current_message,
+            top_k=self.history_recall_top_k,
+            max_entry_chars=self.history_recall_max_chars,
+        )
+        if not matches:
+            return ""
+
+        lines = [self._HISTORY_RECALL_TAG]
+        for idx, entry in enumerate(matches, 1):
+            lines.append(f"{idx}. {entry}")
+        return "\n".join(lines)
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
@@ -131,6 +156,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             {"role": "system", "content": self.build_system_prompt(skill_names)},
             *history,
             {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
+            *(
+                [{"role": "user", "content": history_context}]
+                if (history_context := self._build_history_recall_context(current_message))
+                else []
+            ),
             {"role": "user", "content": self._build_user_content(current_message, media)},
         ]
 

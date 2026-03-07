@@ -21,6 +21,11 @@ def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | 
     return resolved
 
 
+def _is_long_term_memory_path(path: Path) -> bool:
+    """Return True when the path targets the long-term memory file."""
+    return path.name == "MEMORY.md" and path.parent.name == "memory"
+
+
 class ReadFileTool(Tool):
     """Tool to read file contents."""
 
@@ -71,6 +76,11 @@ class WriteFileTool(Tool):
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_long_term_memory_write = False
+
+    def set_memory_write_permission(self, allowed: bool) -> None:
+        """Allow MEMORY.md writes only for the current user turn."""
+        self._allow_long_term_memory_write = allowed
 
     @property
     def name(self) -> str:
@@ -100,6 +110,8 @@ class WriteFileTool(Tool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            if _is_long_term_memory_path(file_path) and not self._allow_long_term_memory_write:
+                return "Error: Updating memory/MEMORY.md requires an explicit user instruction in the current turn."
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {file_path}"
@@ -115,6 +127,11 @@ class EditFileTool(Tool):
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_long_term_memory_write = False
+
+    def set_memory_write_permission(self, allowed: bool) -> None:
+        """Allow MEMORY.md edits only for the current user turn."""
+        self._allow_long_term_memory_write = allowed
 
     @property
     def name(self) -> str:
@@ -150,6 +167,8 @@ class EditFileTool(Tool):
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
                 return f"Error: File not found: {path}"
+            if _is_long_term_memory_path(file_path) and not self._allow_long_term_memory_write:
+                return "Error: Updating memory/MEMORY.md requires an explicit user instruction in the current turn."
 
             content = file_path.read_text(encoding="utf-8")
 
