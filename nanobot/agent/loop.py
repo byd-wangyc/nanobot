@@ -389,8 +389,9 @@ class AgentLoop:
                 media=msg.media,
             )
             messages = await self._build_messages_with_token_budget(session, system_msg)
+            initial_count = len(messages)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, len(messages))
+            self._save_turn(session, all_msgs, initial_count)
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -442,6 +443,7 @@ class AgentLoop:
                 message_tool.start_turn()
 
         initial_messages = await self._build_messages_with_token_budget(session, msg)
+        initial_count = len(initial_messages)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             if msg.channel == "qq":
@@ -460,7 +462,7 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, len(initial_messages))
+        self._save_turn(session, all_msgs, initial_count)
         self.sessions.save(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:

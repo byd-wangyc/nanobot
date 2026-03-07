@@ -91,6 +91,13 @@
 - 每次回答前，强制从 `HISTORY.md` 检索最相关 Top3 注入上下文
 - 归档触发从“按消息数/session”改成“按 token 预算”
 
+补充：
+
+- 2026-03-07 修复过一个 session 落盘 bug
+- 原因是运行过程中 `initial_messages` 被原地扩展，保存时错误地按扩展后的长度跳过，导致新消息没有写进 `workspace/sessions/*.jsonl`
+- 现已改成在 agent 运行前记录固定的 `initial_count` 再保存
+- 这个修复只影响后续新消息；bug 期间没落盘的历史消息无法自动恢复
+
 详细见后面的“记忆系统”章节。
 
 ### 3.4 中文日志与 session 文件可直接阅读
@@ -306,23 +313,57 @@ subagent 当前默认工具更少：
 当前本地实际存在的 workspace skill：
 
 - `tavily-search`
+- `agent-browser`
 
 路径：
 
 - `/Users/wangyc/.nanobot/workspace/skills/tavily-search/SKILL.md`
+- `/Users/wangyc/.nanobot/workspace/skills/agent-browser/SKILL.md`
 
 用途：
 
 - 搜索网页
 - 抽取网页正文
 - 做新闻/舆情/研究资料搜集
+- 浏览器自动化
+- 抓取结构化页面元素
+- 表单填写、点击、截图、导出 PDF
+- 适合需要“真正打开网页并交互”的场景
 
 依赖：
 
 - `node`
 - `TAVILY_API_KEY`
+- `agent-browser` skill 本身要求 `node`、`npm`
 
-### 6.3 skill 的使用方式
+### 6.3 `agent-browser` skill 说明
+
+这是一个浏览器自动化 skill，不是普通 HTTP 抓取。
+
+适合的任务：
+
+- 打开网页并读取可交互元素
+- 点击按钮、填写输入框、翻页
+- 抓取页面上的结构化内容
+- 对网页做截图或导出 PDF
+
+典型命令风格：
+
+```bash
+agent-browser open <url>
+agent-browser snapshot -i
+agent-browser click @e1
+agent-browser fill @e2 "text"
+agent-browser screenshot path.png
+agent-browser pdf output.pdf
+```
+
+和 `web_fetch` 的区别：
+
+- `web_fetch`：更像“下载网页源码/正文”
+- `agent-browser`：更像“真的开浏览器去操作页面”
+
+### 6.4 skill 的使用方式
 
 skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 
@@ -337,12 +378,39 @@ skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 
 这是你本地当前最重要的定制之一。
 
-### 7.1 文件结构
+### 7.1 总体流程图
+
+```mermaid
+flowchart TD
+    A["用户发来新消息"] --> B["读取 session 历史（仅 last_consolidated 之后）"]
+    B --> C["按 recent_history_tokens 截取最近一段 session"]
+    C --> D["从 MEMORY.md 读取长期事实"]
+    D --> E["从 HISTORY.md 做相似度检索，取 Top3"]
+    E --> F["组装 prompt：system + skills + MEMORY + session + HISTORY Top3 + 当前消息"]
+    F --> G{"prompt token 是否超限"}
+    G -- 否 --> H["调用模型"]
+    G -- 是 --> I["把较旧 session 归档到 HISTORY.md"]
+    I --> J["保留最近 keep_tokens = recent_history_tokens"]
+    J --> F
+    H --> K{"是否调用工具"}
+    K -- 是 --> L["执行 tools，继续循环"]
+    L --> F
+    K -- 否 --> M["生成最终回复"]
+    M --> N["把本轮新消息写回 session"]
+```
+
+这个图里最关键的 3 个存储层：
+
+- `session`：短期工作记忆，保存最近对话原文
+- `MEMORY.md`：长期事实记忆，保存用户明确要求长期记住的内容
+- `HISTORY.md`：历史归档记忆，保存旧会话的压缩摘要/事件
+
+### 7.2 文件结构
 
 - `memory/MEMORY.md`：长期事实记忆
 - `memory/HISTORY.md`：历史事件归档
 
-### 7.2 `MEMORY.md` 当前规则
+### 7.3 `MEMORY.md` 当前规则
 
 当前规则不是“自动总结就写长期记忆”，而是：
 
@@ -351,7 +419,7 @@ skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 
 这避免了长期记忆被模型乱写、误写。
 
-### 7.3 `HISTORY.md` 当前规则
+### 7.4 `HISTORY.md` 当前规则
 
 每次回答前：
 
@@ -370,7 +438,7 @@ skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 
 这不是 embedding 检索，但比纯 grep 更稳。
 
-### 7.4 归档逻辑
+### 7.5 归档逻辑
 
 当前归档不再按固定消息条数触发，而是按 token 预算触发：
 
@@ -378,7 +446,75 @@ skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 - 如果 prompt token 超过 `contextWindowTokens - maxTokens`
 - 就归档旧消息到 `HISTORY.md`
 
-### 7.5 当前记忆系统的优点和边界
+这里最关键的一行参数是：
+
+- `keep_tokens=self.recent_history_tokens`
+
+它的意思不是“总共只允许这么多 token”，而是：
+
+- 在执行归档时，**至少尽量保留最近这段 token 预算范围内的 session 原文**
+- 你当前配置里 `recentHistoryTokens = 24000`
+- 所以归档时，系统会尝试：
+  - 把更旧的消息挪去 `HISTORY.md`
+  - 但把最近大约 `24000 tokens` 的会话原文继续留在 session 里
+
+换句话说：
+
+- `recent_history_tokens` 决定“短期工作记忆保留多少”
+- `keep_tokens` 就是归档时实际采用的这个保留预算
+
+它在代码里有两处作用：
+
+1. 构建 prompt 时
+- session 只取最近 `recent_history_tokens` 这段历史进入上下文
+
+2. 触发归档时
+- 旧消息被归档
+- 最近 `recent_history_tokens` 这段尽量不归档
+
+可以用一个例子理解：
+
+- 假设当前 session 原始历史累计约 `60000 tokens`
+- 配置 `recentHistoryTokens = 24000`
+
+那么归档时更接近下面这个效果：
+
+- 前面约 `36000 tokens` 的旧历史 -> 归档到 `HISTORY.md`
+- 后面约 `24000 tokens` 的最近历史 -> 继续保留在 session
+
+所以归档不是“清空 session”，而是“只清旧的，留新的”。
+
+### 7.6 为什么归档后不会立刻失忆
+
+归档后，agent 仍然有 3 层记忆来源：
+
+1. 最近一段 session
+- 也就是上面说的 `keep_tokens = recent_history_tokens`
+- 这是当前任务最直接的上下文
+
+2. `MEMORY.md`
+- 长期事实仍然始终会进入上下文
+
+3. `HISTORY.md` Top3 检索
+- 旧历史虽然不再整段保留在 session
+- 但每轮仍会从 `HISTORY.md` 里召回最相关的 3 条
+
+因此归档后的真实状态不是“没记忆”，而是：
+
+- 最近对话保留原文
+- 更旧对话被压缩
+- 需要时通过检索再召回
+
+真正会弱化的是：
+
+- 很早之前的细节
+- 没写进 `MEMORY.md`
+- 也没有被很好地总结进 `HISTORY.md`
+- 同时检索时又没排进 Top3
+
+这种信息才有可能逐步丢失。
+
+### 7.7 当前记忆系统的优点和边界
 
 优点：
 
@@ -392,6 +528,7 @@ skill 本质上不是 Python 插件，而是“给 agent 的使用手册”。
 - 真正成熟的下一步应该是两阶段检索：
   - lexical recall
   - embedding 或 rerank 重排
+- 如果 session 没有成功落盘，那么重启进程后这部分短期会话历史会丢失；但 `MEMORY.md` 和 `HISTORY.md` 仍然保留，因此 agent 不是“完全没记忆”
 
 ## 8. 会话与 session
 
