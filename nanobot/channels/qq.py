@@ -57,6 +57,7 @@ class QQChannel(BaseChannel):
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
+        self._reply_sequences: dict[str, int] = {}
 
     async def start(self) -> None:
         """Start the QQ bot."""
@@ -104,11 +105,13 @@ class QQChannel(BaseChannel):
         try:
             msg_id = msg.metadata.get("message_id")
             content = self._sanitize_content(msg.content)
+            msg_seq = self._next_msg_seq(msg_id)
             await self._client.api.post_c2c_message(
                 openid=msg.chat_id,
                 msg_type=0,
                 content=content,
                 msg_id=msg_id,
+                msg_seq=msg_seq,
             )
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
@@ -120,6 +123,17 @@ class QQChannel(BaseChannel):
         if sanitized != content:
             logger.warning("QQ message contained URL(s); stripped before sending")
         return sanitized or "[内容为空]"
+
+    def _next_msg_seq(self, msg_id: str | None) -> int:
+        """Return the next reply sequence for a QQ message thread."""
+        if not msg_id:
+            return 1
+        next_seq = self._reply_sequences.get(msg_id, 0) + 1
+        self._reply_sequences[msg_id] = next_seq
+        if len(self._reply_sequences) > 1000:
+            oldest_msg_id = next(iter(self._reply_sequences))
+            self._reply_sequences.pop(oldest_msg_id, None)
+        return next_seq
 
     async def _on_message(self, data: "C2CMessage") -> None:
         """Handle incoming message from QQ."""

@@ -444,6 +444,8 @@ class AgentLoop:
         initial_messages = await self._build_messages_with_token_budget(session, msg)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            if msg.channel == "qq":
+                return
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
